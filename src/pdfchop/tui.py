@@ -38,7 +38,40 @@ class PDFChopTUI:
         self.is_running: bool = True
         self.modal_mode: Optional[str] = None
         self.modal_input: str = ""
+        self.modal_cursor: int = 0
         self.modal_prompt: str = ""
+
+    def open_modal(self, mode: str, prompt: str, default: str = ""):
+        """Open input modal with pre-filled default value and cursor at end."""
+        self.modal_mode = mode
+        self.modal_prompt = prompt
+        self.modal_input = default
+        self.modal_cursor = len(default)
+
+    def _modal_word_left(self):
+        """Move modal cursor one word backward."""
+        idx = self.modal_cursor
+        while idx > 0 and self.modal_input[idx - 1] in (" ", "/", "\\", "-", "_", "."):
+            idx -= 1
+        while idx > 0 and self.modal_input[idx - 1] not in (" ", "/", "\\", "-", "_", "."):
+            idx -= 1
+        self.modal_cursor = idx
+
+    def _modal_word_right(self):
+        """Move modal cursor one word forward."""
+        idx = self.modal_cursor
+        n = len(self.modal_input)
+        while idx < n and self.modal_input[idx] in (" ", "/", "\\", "-", "_", "."):
+            idx += 1
+        while idx < n and self.modal_input[idx] not in (" ", "/", "\\", "-", "_", "."):
+            idx += 1
+        self.modal_cursor = idx
+
+    def _modal_delete_word_backward(self):
+        """Delete word backward from modal cursor."""
+        start = self.modal_cursor
+        self._modal_word_left()
+        self.modal_input = self.modal_input[: self.modal_cursor] + self.modal_input[start :]
 
     def load_document(self):
         """Load document and build metadata."""
@@ -202,11 +235,19 @@ class PDFChopTUI:
 
         # Modal bar or status bar
         if self.modal_mode:
-            modal_str = f"\x1b[1;33m[INPUT]\x1b[0m {self.modal_prompt}\x1b[1;37m{self.modal_input}\x1b[0m\x1b[5m█\x1b[0m"
-            buf.append(modal_str.ljust(cols) + "\n")
+            cur_idx = max(0, min(len(self.modal_input), self.modal_cursor))
+            before = self.modal_input[:cur_idx]
+            if cur_idx < len(self.modal_input):
+                cur_char = f"\x1b[7;1m{self.modal_input[cur_idx]}\x1b[0m"
+                after = self.modal_input[cur_idx + 1 :]
+            else:
+                cur_char = "\x1b[7;1m \x1b[0m"
+                after = ""
+            modal_str = f"\x1b[1;33m[INPUT]\x1b[0m {self.modal_prompt}\x1b[1;37m{before}\x1b[0m{cur_char}\x1b[1;37m{after}\x1b[0m"
+            buf.append(f"{modal_str}\x1b[K\n")
         else:
             status_disp = f"\x1b[1;32m●\x1b[0m {self.status_message}"
-            buf.append(status_disp.ljust(cols) + "\n")
+            buf.append(f"{status_disp}\x1b[K\n")
 
         # Controls Hint Bar
         zoom_hint = "Unzoom" if self.zoom_mode else "Zoom"
@@ -230,27 +271,111 @@ class PDFChopTUI:
         sys.stdout.write("".join(buf))
         sys.stdout.flush()
 
-    def handle_input(self):
-        """Read unbuffered keystrokes and dispatch actions."""
+    def read_input(self) -> str:
+        """Read unbuffered keystroke sequence from stdin."""
         try:
-            seq = os.read(sys.stdin.fileno(), 32).decode("utf-8", errors="ignore")
+            return os.read(sys.stdin.fileno(), 4096).decode("utf-8", errors="ignore")
         except Exception:
-            return
+            return ""
+
+    def handle_input(self, seq: Optional[str] = None):
+        """Read unbuffered keystrokes and dispatch actions."""
+        if seq is None:
+            seq = self.read_input()
 
         if not seq:
             return
 
+        # Strip bracketed paste wrappers if emitted by terminal
+        seq = seq.replace("\x1b[200~", "").replace("\x1b[201~", "")
+
         # Modal input mode handling
         if self.modal_mode:
-            if seq in ("\r", "\n"):
+            # 1. Enter: execute modal action
+            if seq in ("\r", "\n", "\r\n"):
                 self.execute_modal_action()
-            elif seq in ("\x1b", "\x03"):  # Esc or Ctrl+C
+                return
+
+            # 2. Escape or Ctrl+C: Cancel
+            if seq in ("\x1b", "\x03"):
                 self.modal_mode = None
                 self.status_message = "Action cancelled."
-            elif seq in ("\x7f", "\x08"):  # Backspace
-                self.modal_input = self.modal_input[:-1]
-            elif len(seq) == 1 and ord(seq) >= 32:
-                self.modal_input += seq
+                return
+
+            # 3. Left Arrow / Ctrl+B: Cursor left
+            if seq in ("\x1b[D", "\x1bOD", "\x02"):
+                self.modal_cursor = max(0, self.modal_cursor - 1)
+                return
+
+            # 4. Right Arrow / Ctrl+F: Cursor right
+            if seq in ("\x1b[C", "\x1bOC", "\x06"):
+                self.modal_cursor = min(len(self.modal_input), self.modal_cursor + 1)
+                return
+
+            # 5. Home / Ctrl+A: Cursor to start
+            if seq in ("\x1b[H", "\x1b[1~", "\x1bOH", "\x01"):
+                self.modal_cursor = 0
+                return
+
+            # 6. End / Ctrl+E: Cursor to end
+            if seq in ("\x1b[F", "\x1b[4~", "\x1bOF", "\x05"):
+                self.modal_cursor = len(self.modal_input)
+                return
+
+            # 7. Word jump left: Alt+b, Ctrl+Left, Alt+Left
+            if seq in ("\x1bb", "\x1b[1;5D", "\x1b[5D", "\x1b[1;3D", "\x1b\x1b[D"):
+                self._modal_word_left()
+                return
+
+            # 8. Word jump right: Alt+f, Ctrl+Right, Alt+Right
+            if seq in ("\x1bf", "\x1b[1;5C", "\x1b[5C", "\x1b[1;3C", "\x1b\x1b[C"):
+                self._modal_word_right()
+                return
+
+            # 9. Backspace / Ctrl+H: delete char before cursor
+            if seq in ("\x7f", "\x08"):
+                if self.modal_cursor > 0:
+                    self.modal_input = (
+                        self.modal_input[: self.modal_cursor - 1]
+                        + self.modal_input[self.modal_cursor :]
+                    )
+                    self.modal_cursor -= 1
+                return
+
+            # 10. Delete key / Ctrl+D: delete char at cursor
+            if seq in ("\x1b[3~", "\x04"):
+                if self.modal_cursor < len(self.modal_input):
+                    self.modal_input = (
+                        self.modal_input[: self.modal_cursor]
+                        + self.modal_input[self.modal_cursor + 1 :]
+                    )
+                return
+
+            # 11. Ctrl+U: clear entire line
+            if seq == "\x15":
+                self.modal_input = ""
+                self.modal_cursor = 0
+                return
+
+            # 12. Ctrl+K: clear to end of line
+            if seq == "\x0b":
+                self.modal_input = self.modal_input[: self.modal_cursor]
+                return
+
+            # 13. Ctrl+W or Alt+Backspace: delete word backward
+            if seq in ("\x17", "\x1b\x7f"):
+                self._modal_delete_word_backward()
+                return
+
+            # 14. Printable characters insertion (typing or pasted strings)
+            clean_text = "".join(ch for ch in seq if ord(ch) >= 32 and ch != "\x7f")
+            if clean_text:
+                self.modal_input = (
+                    self.modal_input[: self.modal_cursor]
+                    + clean_text
+                    + self.modal_input[self.modal_cursor :]
+                )
+                self.modal_cursor += len(clean_text)
             return
 
         # Navigation: Arrow Up / k
@@ -289,25 +414,19 @@ class PDFChopTUI:
             self.action_rotate()
         # 'd': Delete selected or current page
         elif seq == "d":
-            self.modal_mode = "delete_confirm"
-            target = list(self.checked_pages) if self.checked_pages else [self.selected_index + 1]
-            self.modal_prompt = f"Delete {len(target)} page(s) {target}? [y/N]: "
-            self.modal_input = ""
+            target = sorted(list(self.checked_pages)) if self.checked_pages else [self.selected_index + 1]
+            self.open_modal("delete_confirm", f"Delete {len(target)} page(s) {target}? [y/N]: ", "y")
         # 'c': Compress target size modal
         elif seq == "c":
-            self.modal_mode = "compress_target"
-            self.modal_prompt = "Target size budget (e.g. 2MB, 500KB, or press Enter for auto): "
-            self.modal_input = ""
+            self.open_modal("compress_target", "Target size budget (e.g. 2MB, 500KB, or press Enter for auto): ", "")
         # 'e': Extract pages modal
         elif seq == "e":
-            self.modal_mode = "extract_path"
-            self.modal_prompt = "Save extracted pages to path (default: <name>_extracted.pdf): "
-            self.modal_input = ""
+            base, ext = os.path.splitext(self.filepath)
+            default_path = f"{base}_extracted{ext}"
+            self.open_modal("extract_path", "Save extracted pages to path: ", default_path)
         # 'w': Watermark modal
         elif seq == "w":
-            self.modal_mode = "watermark_text"
-            self.modal_prompt = "Enter watermark text (default: CONFIDENTIAL): "
-            self.modal_input = ""
+            self.open_modal("watermark_text", "Enter watermark text (default: CONFIDENTIAL): ", "CONFIDENTIAL")
         # 'k': Deskew and clean
         elif seq == "k":
             self.action_enhance()
@@ -316,20 +435,9 @@ class PDFChopTUI:
             self.action_number()
         # 's': Save document copy
         elif seq == "s":
-            self.modal_mode = "save_path"
-            self.modal_prompt = "Save modified PDF to path: "
-            self.modal_input = ""
-        # 'p': Toggle graphics mode (Kitty high-res vs Half-block)
-        elif seq in ("p", "P"):
-            if self.render_mode == "kitty":
-                self.render_mode = "halfblock"
-                sys.stdout.write("\x1b_Ga=d,d=a\x1b\\")
-                sys.stdout.flush()
-                self.status_message = "Graphics mode: Unicode Half-Block."
-            else:
-                self.render_mode = "kitty"
-                self.thumbnail_cache.clear()
-                self.status_message = "Graphics mode: High-Res Retina (Kitty Graphics)."
+            base, ext = os.path.splitext(self.filepath)
+            default_path = f"{base}_saved{ext}"
+            self.open_modal("save_path", "Save modified PDF to path: ", default_path)
         # 'v' or Enter: Toggle Zoom mode
         elif seq in ("v", "V", "\r", "\n"):
             self.zoom_mode = not self.zoom_mode
@@ -424,10 +532,11 @@ class PDFChopTUI:
                 self.status_message = f"Compress error: {e}"
 
         elif mode == "extract_path":
-            target = list(self.checked_pages) if self.checked_pages else [self.selected_index + 1]
+            target = sorted(list(self.checked_pages)) if self.checked_pages else [self.selected_index + 1]
             range_str = ", ".join(str(p) for p in target)
             base, ext = os.path.splitext(self.filepath)
-            out_path = val if val else f"{base}_extracted{ext}"
+            cleaned = val.strip("'\"")
+            out_path = os.path.expanduser(cleaned) if cleaned else f"{base}_extracted{ext}"
             try:
                 res = extract_pages(self.filepath, range_str, output_path=out_path, password=self.password)
                 self.status_message = f"Extracted {len(target)} page(s) -> {os.path.basename(out_path)}"
@@ -446,7 +555,8 @@ class PDFChopTUI:
                 self.status_message = f"Watermark error: {e}"
 
         elif mode == "save_path":
-            out_path = val
+            cleaned = val.strip("'\"")
+            out_path = os.path.expanduser(cleaned) if cleaned else ""
             if not out_path:
                 self.status_message = "Save cancelled: no path specified."
                 return
