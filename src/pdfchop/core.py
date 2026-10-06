@@ -1,6 +1,7 @@
 """Core PyMuPDF operations, geometry helpers, and terminal visual renderers."""
 import os
 import re
+import base64
 from typing import List, Tuple, Optional
 import pymupdf
 from PIL import Image, ImageEnhance
@@ -225,4 +226,42 @@ def render_halfblock_thumbnail(page: pymupdf.Page, width: int = 36, max_height: 
         return lines
     except Exception as e:
         return [f"[Thumbnail error: {e}]"]
+
+
+def supports_kitty_graphics() -> bool:
+    """Detect if current terminal environment supports Kitty Graphics Protocol."""
+    term = os.environ.get("TERM", "").lower()
+    term_prog = os.environ.get("TERM_PROGRAM", "").lower()
+    if any(k in term for k in ("ghostty", "kitty", "wezterm")):
+        return True
+    if any(k in term_prog for k in ("ghostty", "kitty", "wezterm")):
+        return True
+    if os.environ.get("GHOSTTY_RESOURCES_DIR") or os.environ.get("KITTY_WINDOW_ID"):
+        return True
+    return False
+
+
+def render_kitty_png(page: pymupdf.Page, dpi: int = 150) -> bytes:
+    """Render page directly to PNG bytes for high-res hardware display."""
+    pix = page.get_pixmap(dpi=dpi, alpha=False)
+    return pix.tobytes("png")
+
+
+def format_kitty_image(png_bytes: bytes, cols: int, rows: int, image_id: int = 1) -> str:
+    """
+    Format PNG image into chunked Kitty Graphics Protocol escape sequences.
+    Replaces existing image with image_id so frames transition smoothly.
+    """
+    b64 = base64.b64encode(png_bytes).decode("ascii")
+    chunk_size = 4096
+    chunks = [b64[i : i + chunk_size] for i in range(0, len(b64), chunk_size)]
+    res = []
+    for i, chunk in enumerate(chunks):
+        m = 1 if i < len(chunks) - 1 else 0
+        if i == 0:
+            res.append(f"\x1b_Ga=T,f=100,i={image_id},c={cols},r={rows},m={m};{chunk}\x1b\\")
+        else:
+            res.append(f"\x1b_Gm={m};{chunk}\x1b\\")
+    return "".join(res)
+
 
