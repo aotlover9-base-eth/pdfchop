@@ -32,7 +32,9 @@ class PDFChopTUI:
         self.viewport_top: int = 0
         self.checked_pages: Set[int] = set()  # 1-indexed
         self.thumbnail_cache: Dict[Tuple[int, int, int], List[str]] = {}
-        self.status_message: str = "Ready. Use [↑/↓] to navigate, [Space] to select, [c] compress, [d] delete."
+        self.zoom_mode: bool = False
+        self.view_mode: str = "visual"  # "visual" or "text"
+        self.status_message: str = "Ready. [↑/↓] navigate, [Space] select, [v] zoom, [t] text view, [c] compress."
         self.is_running: bool = True
         self.modal_mode: Optional[str] = None
         self.modal_input: str = ""
@@ -60,6 +62,28 @@ class PDFChopTUI:
         page = self.doc[pno]
         lines = render_halfblock_thumbnail(page, width=width, max_height=max_h)
         self.thumbnail_cache[key] = lines
+        return lines
+
+    def get_page_text_lines(self, pno: int, width: int, max_h: int) -> List[str]:
+        """Fetch cleanly formatted selectable text lines for the page."""
+        if not self.doc or pno >= len(self.doc):
+            return ["No page"]
+        page = self.doc[pno]
+        raw_text = page.get_text()
+        if not raw_text.strip():
+            return ["\x1b[90m(Blank page or scanned image with no selectable text)\x1b[0m"]
+        lines = [f"\x1b[1;36m── Page {pno + 1} Extracted Text ({len(raw_text.strip())} chars) ──\x1b[0m", ""]
+        for para in raw_text.splitlines():
+            p_strip = para.strip()
+            if not p_strip:
+                lines.append("")
+                continue
+            while len(p_strip) > width:
+                lines.append(f"\x1b[37m{p_strip[:width]}\x1b[0m")
+                p_strip = p_strip[width:]
+            lines.append(f"\x1b[37m{p_strip}\x1b[0m")
+            if len(lines) >= max_h:
+                break
         return lines
 
     def run(self):
@@ -106,21 +130,32 @@ class PDFChopTUI:
         pcount = self.metadata.page_count
         selected_count = len(self.checked_pages)
 
+        badges = []
+        if self.zoom_mode:
+            badges.append("\x1b[1;33m[ZOOM]\x1b[0m")
+        if self.view_mode == "text":
+            badges.append("\x1b[1;35m[TEXT]\x1b[0m")
+        badge_str = (" " + " ".join(badges)) if badges else ""
+
         header_str = (
             f"\x1b[1;36mPDFCHOP\x1b[0m \x1b[90m•\x1b[0m "
             f"\x1b[1;37m{fname}\x1b[0m \x1b[90m•\x1b[0m "
             f"Pages: \x1b[1;32m{pcount}\x1b[0m \x1b[90m•\x1b[0m "
             f"Size: \x1b[1;33m{fsize}\x1b[0m \x1b[90m•\x1b[0m "
             f"Selected: \x1b[1;35m{selected_count}\x1b[0m"
+            f"{badge_str}"
         )
         buf.append(header_str.ljust(cols) + "\n")
         buf.append("\x1b[90m" + "─" * cols + "\x1b[0m\n")
 
         # Layout splits
-        # Left pane: 42 cols, Right pane: remainder
-        left_w = min(44, max(36, cols // 2))
-        right_w = max(24, cols - left_w - 3)
         body_rows = max(8, rows - 6)
+        if self.zoom_mode:
+            left_w = 0
+            right_w = max(24, cols - 2)
+        else:
+            left_w = min(32, max(24, cols // 4))
+            right_w = max(24, cols - left_w - 3)
 
         # Calculate scroll viewport
         if self.selected_index < self.viewport_top:
@@ -128,34 +163,39 @@ class PDFChopTUI:
         elif self.selected_index >= self.viewport_top + body_rows:
             self.viewport_top = self.selected_index - body_rows + 1
 
-        # Fetch active thumbnail
-        thumb_lines = self.get_thumbnail(self.selected_index, width=right_w, max_h=body_rows)
+        # Fetch active content (visual thumbnail or extracted text)
+        if self.view_mode == "text":
+            content_lines = self.get_page_text_lines(self.selected_index, width=right_w, max_h=body_rows)
+        else:
+            content_lines = self.get_thumbnail(self.selected_index, width=right_w, max_h=body_rows)
 
         # Render split body rows
         for r in range(body_rows):
             page_idx = self.viewport_top + r
-            left_text = ""
-            if page_idx < pcount:
-                pinfo = self.metadata.pages[page_idx]
-                pnum = page_idx + 1
-                is_curr = (page_idx == self.selected_index)
-                is_chk = (pnum in self.checked_pages)
+            right_text = content_lines[r] if r < len(content_lines) else ""
+            if self.zoom_mode:
+                buf.append(f" {right_text}\n")
+            else:
+                left_text = ""
+                if page_idx < pcount:
+                    pinfo = self.metadata.pages[page_idx]
+                    pnum = page_idx + 1
+                    is_curr = (page_idx == self.selected_index)
+                    is_chk = (pnum in self.checked_pages)
 
-                chk_box = "\x1b[1;32m[x]\x1b[0m" if is_chk else "\x1b[90m[ ]\x1b[0m"
-                rot_badge = f"\x1b[33m{pinfo.rotation}°\x1b[0m" if pinfo.rotation != 0 else "\x1b[90m0°\x1b[0m"
-                dim_badge = f"\x1b[36m{pinfo.dimensions_name}\x1b[0m"
-                blank_tag = " \x1b[1;31m[BLANK]\x1b[0m" if pinfo.is_blank else ""
+                    chk_box = "\x1b[1;32m[x]\x1b[0m" if is_chk else "\x1b[90m[ ]\x1b[0m"
+                    rot_badge = f"\x1b[33m{pinfo.rotation}°\x1b[0m" if pinfo.rotation != 0 else "\x1b[90m0°\x1b[0m"
+                    dim_badge = f"\x1b[36m{pinfo.dimensions_name}\x1b[0m"
+                    blank_tag = " \x1b[1;31m[BLANK]\x1b[0m" if pinfo.is_blank else ""
 
-                row_content = f"{chk_box} \x1b[1mPage {str(pnum).zfill(2)}\x1b[0m {dim_badge} {rot_badge}{blank_tag}"
-                if is_curr:
-                    left_text = f"\x1b[48;5;236m {row_content} \x1b[0m"
-                else:
-                    left_text = f" {row_content} "
+                    row_content = f"{chk_box} \x1b[1mPage {str(pnum).zfill(2)}\x1b[0m {dim_badge} {rot_badge}{blank_tag}"
+                    if is_curr:
+                        left_text = f"\x1b[48;5;236m {row_content} \x1b[0m"
+                    else:
+                        left_text = f" {row_content} "
 
-            # Right thumbnail line
-            right_text = thumb_lines[r] if r < len(thumb_lines) else ""
-            line_out = f"{left_text:<{left_w}}\x1b[90m│\x1b[0m {right_text}"
-            buf.append(line_out + "\n")
+                line_out = f"{left_text:<{left_w}}\x1b[90m│\x1b[0m {right_text}"
+                buf.append(line_out + "\n")
 
         # Separator
         buf.append("\x1b[90m" + "─" * cols + "\x1b[0m\n")
@@ -169,9 +209,13 @@ class PDFChopTUI:
             buf.append(status_disp.ljust(cols) + "\n")
 
         # Controls Hint Bar
+        zoom_hint = "Unzoom" if self.zoom_mode else "Zoom"
+        view_hint = "Visual" if self.view_mode == "text" else "Text"
         controls = (
             "\x1b[1;36m[↑/↓]\x1b[0m Move  "
-            "\x1b[1;36m[Spc]\x1b[0m Select  "
+            "\x1b[1;36m[Spc]\x1b[0m Sel  "
+            f"\x1b[1;32m[v]\x1b[0m {zoom_hint}  "
+            f"\x1b[1;33m[t]\x1b[0m {view_hint}  "
             "\x1b[1;32m[c]\x1b[0m Compress  "
             "\x1b[1;31m[d]\x1b[0m Del  "
             "\x1b[1;33m[r]\x1b[0m Rot  "
@@ -275,6 +319,21 @@ class PDFChopTUI:
             self.modal_mode = "save_path"
             self.modal_prompt = "Save modified PDF to path: "
             self.modal_input = ""
+        # 'v' or Enter: Toggle Zoom mode
+        elif seq in ("v", "V", "\r", "\n"):
+            self.zoom_mode = not self.zoom_mode
+            self.thumbnail_cache.clear()
+            self.status_message = "Zoom mode enabled (full width)." if self.zoom_mode else "Split view enabled."
+        # 't': Toggle Text inspection vs visual thumbnail
+        elif seq in ("t", "T"):
+            self.view_mode = "text" if self.view_mode == "visual" else "visual"
+            self.status_message = "Text Inspector Mode (raw text)." if self.view_mode == "text" else "Visual Page Preview Mode."
+        # Esc: Exit zoom mode if active
+        elif seq == "\x1b":
+            if self.zoom_mode:
+                self.zoom_mode = False
+                self.thumbnail_cache.clear()
+                self.status_message = "Split view enabled."
         # 'q': Quit
         elif seq in ("q", "Q", "\x03"):
             self.is_running = False

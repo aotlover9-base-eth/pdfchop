@@ -3,7 +3,7 @@ import os
 import re
 from typing import List, Tuple, Optional
 import pymupdf
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 from .models import PDFMetadata, PageInfo
 
@@ -169,37 +169,55 @@ def inspect_document(filepath_or_doc, password: Optional[str] = None) -> PDFMeta
 
 def render_halfblock_thumbnail(page: pymupdf.Page, width: int = 36, max_height: int = 24) -> List[str]:
     """
-    Render a 24-bit truecolor Unicode half-block (▀) thumbnail directly to terminal lines.
-    Each character cell represents 2 vertical subpixels.
+    Render a crisp 24-bit Truecolor Unicode half-block (▀) thumbnail directly to terminal lines.
+    Strictly preserves page aspect ratio without squishing or stretching.
+    Uses high-DPI rasterization and Lanczos resampling with sharpness enhancement.
     """
     try:
-        # Render low-res pixmap fast
-        dpi = 36
-        pix = page.get_pixmap(dpi=dpi, alpha=False)
+        rect = page.rect
+        pw, ph = rect.width, rect.height
+        if pw <= 0 or ph <= 0:
+            return ["[Empty page]"]
+
+        # Page aspect ratio (height / width)
+        aspect = ph / pw
+
+        # In terminal, each cell contains 2 vertical half-blocks (▀)
+        # Terminal cells have ~1:2 font aspect ratio, meaning half-blocks are ~1:1 square
+        max_pixel_h = max_height * 2
+
+        # Fit into bounding box (width, max_pixel_h) preserving aspect ratio strictly
+        if width * aspect > max_pixel_h:
+            target_pixel_h = max_pixel_h
+            target_w = max(6, int(round(target_pixel_h / aspect)))
+        else:
+            target_w = max(6, width)
+            target_pixel_h = max(4, int(round(target_w * aspect)))
+
+        if target_pixel_h % 2 != 0:
+            target_pixel_h += 1
+
+        # Super-sampled rasterization for crisp subpixel font rendering
+        target_dpi = max(72, min(200, int(72 * (target_w * 2.5 / pw))))
+        pix = page.get_pixmap(dpi=target_dpi, alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        # Calculate proportional size
-        aspect = img.height / max(1, img.width)
-        target_h = int(round(width * aspect))
-        # Ensure target_h is even since halfblock groups 2 vertical pixels
-        if target_h % 2 != 0:
-            target_h += 1
-        
-        # Clamp height to fit terminal viewport
-        target_h = min(target_h, max_height * 2)
-        if target_h < 4:
-            target_h = 4
-        
-        target_w = max(10, width)
-        img = img.resize((target_w, target_h), Image.Resampling.BILINEAR)
+        # High-precision Lanczos downsampling
+        img_resized = img.resize((target_w, target_pixel_h), Image.Resampling.LANCZOS)
+
+        # Crisp sharpness and contrast enhancement for terminal half-blocks
+        enhancer_s = ImageEnhance.Sharpness(img_resized)
+        img_crisp = enhancer_s.enhance(2.0)
+        enhancer_c = ImageEnhance.Contrast(img_crisp)
+        img_crisp = enhancer_c.enhance(1.15)
 
         lines: List[str] = []
-        for y in range(0, target_h, 2):
+        for y in range(0, target_pixel_h, 2):
             line_parts = []
             for x in range(target_w):
-                r1, g1, b1 = img.getpixel((x, y))
-                if y + 1 < target_h:
-                    r2, g2, b2 = img.getpixel((x, y + 1))
+                r1, g1, b1 = img_crisp.getpixel((x, y))
+                if y + 1 < target_pixel_h:
+                    r2, g2, b2 = img_crisp.getpixel((x, y + 1))
                 else:
                     r2, g2, b2 = 0, 0, 0
                 line_parts.append(f"\x1b[38;2;{r1};{g1};{b1}m\x1b[48;2;{r2};{g2};{b2}m▀\x1b[0m")
@@ -207,3 +225,4 @@ def render_halfblock_thumbnail(page: pymupdf.Page, width: int = 36, max_height: 
         return lines
     except Exception as e:
         return [f"[Thumbnail error: {e}]"]
+
