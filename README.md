@@ -1,25 +1,12 @@
+# pdfchop ⚡
+ 
+> Overkilled 100% offline PDF Swiss-Army workstation and zero-flicker visual terminal utility.
+
 <div align="center">
-
-<img src="assets/banner.png" alt="pdfchop banner" width="860" />
-
-<p align="center">
-  <a href="https://github.com/aotlover9-base-eth/100-days-100-problems-100-solutions"><img src="https://img.shields.io/badge/100_Days-Day_007-8B5CF6?style=for-the-badge&logo=github" alt="Day 7" /></a>
-  <img src="https://img.shields.io/badge/Target_Compressor-<500KB_Verified-06B6D4?style=for-the-badge" alt="Target Compressor" />
-  <img src="https://img.shields.io/badge/TUI-Unicode_Half--Block-10B981?style=for-the-badge" alt="Half-Block TUI" />
-  <img src="https://img.shields.io/badge/Tests-27_Passing-3B82F6?style=for-the-badge&logo=pytest" alt="Tests" />
-  <img src="https://img.shields.io/badge/License-MIT-F59E0B?style=for-the-badge" alt="License" />
-</p>
-
-<p align="center">
-  <a href="#quickstart"><b>Quickstart</b></a> &nbsp;•&nbsp;
-  <a href="#command-cheat-sheet"><b>Command Cheat Sheet</b></a> &nbsp;•&nbsp;
-  <a href="#interactive-tui-controls"><b>TUI Controls</b></a> &nbsp;•&nbsp;
-  <a href="#under-the-hood-technical-architecture"><b>Architecture</b></a>
-</p>
-
-<img src="assets/preview.png" alt="pdfchop interactive terminal dashboard" width="860" />
-
+  <img src="assets/preview.png" alt="pdfchop interactive terminal dashboard" width="860" />
 </div>
+
+---
 
 ## Quickstart
 
