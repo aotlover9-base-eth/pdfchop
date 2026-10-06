@@ -4,7 +4,7 @@ import re
 import base64
 from typing import List, Tuple, Optional
 import pymupdf
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
 from .models import PDFMetadata, PageInfo
 
@@ -170,9 +170,10 @@ def inspect_document(filepath_or_doc, password: Optional[str] = None) -> PDFMeta
 
 def render_halfblock_thumbnail(page: pymupdf.Page, width: int = 36, max_height: int = 24) -> List[str]:
     """
-    Render a crisp 24-bit Truecolor Unicode half-block (▀) thumbnail directly to terminal lines.
+    Render a crisp, high-contrast 24-bit Truecolor Unicode half-block (▀) thumbnail.
     Strictly preserves page aspect ratio without squishing or stretching.
-    Uses high-DPI rasterization and Lanczos resampling with sharpness enhancement.
+    Uses stroke reinforcement, high-DPI rendering, and contrast boosting so text and
+    diagrams remain distinctly visible and punchy.
     """
     try:
         rect = page.rect
@@ -198,19 +199,22 @@ def render_halfblock_thumbnail(page: pymupdf.Page, width: int = 36, max_height: 
         if target_pixel_h % 2 != 0:
             target_pixel_h += 1
 
-        # Super-sampled rasterization for crisp subpixel font rendering
-        target_dpi = max(72, min(200, int(72 * (target_w * 2.5 / pw))))
-        pix = page.get_pixmap(dpi=target_dpi, alpha=False)
+        # Render high-resolution raster from MuPDF
+        pix = page.get_pixmap(dpi=150, alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        # High-precision Lanczos downsampling
-        img_resized = img.resize((target_w, target_pixel_h), Image.Resampling.LANCZOS)
+        # Stroke reinforcement: dilate dark strokes so thin font glyphs don't wash out into faint gray
+        dilated = img.filter(ImageFilter.MinFilter(3))
+        reinforced = Image.blend(img, dilated, 0.45)
 
-        # Crisp sharpness and contrast enhancement for terminal half-blocks
-        enhancer_s = ImageEnhance.Sharpness(img_resized)
-        img_crisp = enhancer_s.enhance(2.0)
-        enhancer_c = ImageEnhance.Contrast(img_crisp)
-        img_crisp = enhancer_c.enhance(1.15)
+        # High-precision Lanczos downsampling
+        img_resized = reinforced.resize((target_w, target_pixel_h), Image.Resampling.LANCZOS)
+
+        # High-contrast punch and sharpness enhancement so text stands out vividly against paper
+        enhancer_c = ImageEnhance.Contrast(img_resized)
+        img_crisp = enhancer_c.enhance(2.2)
+        enhancer_s = ImageEnhance.Sharpness(img_crisp)
+        img_crisp = enhancer_s.enhance(2.5)
 
         lines: List[str] = []
         for y in range(0, target_pixel_h, 2):

@@ -15,9 +15,6 @@ from .core import (
     inspect_document,
     format_bytes,
     render_halfblock_thumbnail,
-    supports_kitty_graphics,
-    render_kitty_png,
-    format_kitty_image,
 )
 from .compressor import compress_pdf
 from .surgeon import delete_pages, rotate_pages, extract_pages
@@ -35,12 +32,9 @@ class PDFChopTUI:
         self.viewport_top: int = 0
         self.checked_pages: Set[int] = set()  # 1-indexed
         self.thumbnail_cache: Dict[Tuple[int, int, int], List[str]] = {}
-        self.kitty_supported: bool = supports_kitty_graphics()
-        self.render_mode: str = "kitty" if self.kitty_supported else "halfblock"
-        self.kitty_png_cache: Dict[int, bytes] = {}
         self.zoom_mode: bool = False
         self.view_mode: str = "visual"  # "visual" or "text"
-        self.status_message: str = "Ready. [↑/↓] navigate, [Space] select, [v] zoom, [t] text, [p] graphics mode."
+        self.status_message: str = "Ready. [↑/↓] navigate, [Space] select, [v] zoom, [t] text view, [c] compress."
         self.is_running: bool = True
         self.modal_mode: Optional[str] = None
         self.modal_input: str = ""
@@ -56,18 +50,6 @@ class PDFChopTUI:
         self.doc = open_document(self.filepath, self.password)
         self.metadata = inspect_document(self.doc, self.password)
         self.thumbnail_cache.clear()
-        self.kitty_png_cache.clear()
-
-    def get_kitty_png(self, pno: int) -> Optional[bytes]:
-        """Fetch or render cached PNG bytes for high-res Kitty graphics."""
-        if pno in self.kitty_png_cache:
-            return self.kitty_png_cache[pno]
-        if not self.doc or pno >= len(self.doc):
-            return None
-        page = self.doc[pno]
-        png_bytes = render_kitty_png(page, dpi=180)
-        self.kitty_png_cache[pno] = png_bytes
-        return png_bytes
 
     def get_thumbnail(self, pno: int, width: int, max_h: int) -> List[str]:
         """Fetch or render cached Unicode half-block thumbnail."""
@@ -123,8 +105,6 @@ class PDFChopTUI:
                 self.handle_input()
         finally:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
-            # Clear any kitty graphics
-            sys.stdout.write("\x1b_Ga=d,d=a\x1b\\")
             # Restore normal screen buffer, show cursor
             sys.stdout.write("\x1b[?1049l\x1b[?25h")
             sys.stdout.flush()
@@ -155,10 +135,6 @@ class PDFChopTUI:
             badges.append("\x1b[1;33m[ZOOM]\x1b[0m")
         if self.view_mode == "text":
             badges.append("\x1b[1;35m[TEXT]\x1b[0m")
-        elif self.render_mode == "kitty":
-            badges.append("\x1b[1;32m[HI-RES RETINA]\x1b[0m")
-        else:
-            badges.append("\x1b[1;36m[HALF-BLOCK]\x1b[0m")
         badge_str = (" " + " ".join(badges)) if badges else ""
 
         header_str = (
@@ -187,35 +163,10 @@ class PDFChopTUI:
         elif self.selected_index >= self.viewport_top + body_rows:
             self.viewport_top = self.selected_index - body_rows + 1
 
-        use_kitty = (self.view_mode == "visual" and self.render_mode == "kitty")
-        kitty_seq = None
-
-        if use_kitty and self.doc and self.selected_index < len(self.doc):
-            page = self.doc[self.selected_index]
-            pw, ph = page.rect.width, page.rect.height
-            aspect = (ph / pw) if pw > 0 else 0.75
-
-            target_rows = body_rows
-            target_cols = int(round(target_rows * 2 / aspect))
-            if target_cols > right_w:
-                target_cols = right_w
-                target_rows = max(4, int(round((target_cols * aspect) / 2)))
-
-            offset_r = 3 + max(0, (body_rows - target_rows) // 2)
-            offset_c = (left_w + 3 if not self.zoom_mode else 2) + max(0, (right_w - target_cols) // 2)
-
-            png_bytes = self.get_kitty_png(self.selected_index)
-            if png_bytes:
-                kitty_seq = (offset_r, offset_c, format_kitty_image(png_bytes, target_cols, target_rows, image_id=1))
-
-        if not use_kitty:
-            buf.append("\x1b_Ga=d,d=a\x1b\\")
-
-        # Fetch lines for text mode or half-block mode
-        content_lines = []
+        # Fetch active content (visual thumbnail or extracted text)
         if self.view_mode == "text":
             content_lines = self.get_page_text_lines(self.selected_index, width=right_w, max_h=body_rows)
-        elif not use_kitty:
+        else:
             content_lines = self.get_thumbnail(self.selected_index, width=right_w, max_h=body_rows)
 
         # Render split body rows
@@ -223,10 +174,7 @@ class PDFChopTUI:
             page_idx = self.viewport_top + r
             right_text = content_lines[r] if r < len(content_lines) else ""
             if self.zoom_mode:
-                if use_kitty:
-                    buf.append("\x1b[K\n")
-                else:
-                    buf.append(f" {right_text}\x1b[K\n")
+                buf.append(f" {right_text}\x1b[K\n")
             else:
                 left_text = ""
                 if page_idx < pcount:
@@ -246,10 +194,7 @@ class PDFChopTUI:
                     else:
                         left_text = f" {row_content} "
 
-                if use_kitty:
-                    line_out = f"{left_text:<{left_w}}\x1b[90m│\x1b[0m\x1b[K"
-                else:
-                    line_out = f"{left_text:<{left_w}}\x1b[90m│\x1b[0m {right_text}\x1b[K"
+                line_out = f"{left_text:<{left_w}}\x1b[90m│\x1b[0m {right_text}\x1b[K"
                 buf.append(line_out + "\n")
 
         # Separator
@@ -266,14 +211,12 @@ class PDFChopTUI:
         # Controls Hint Bar
         zoom_hint = "Unzoom" if self.zoom_mode else "Zoom"
         view_hint = "Visual" if self.view_mode == "text" else "Text"
-        gfx_hint = "HalfBlk" if self.render_mode == "kitty" else "Hi-Res"
         controls = (
             "\x1b[1;36m[↑/↓]\x1b[0m Move  "
             "\x1b[1;36m[Spc]\x1b[0m Sel  "
             f"\x1b[1;32m[v]\x1b[0m {zoom_hint}  "
             f"\x1b[1;33m[t]\x1b[0m {view_hint}  "
-            f"\x1b[1;35m[p]\x1b[0m {gfx_hint}  "
-            "\x1b[1;32m[c]\x1b[0m Comp  "
+            "\x1b[1;32m[c]\x1b[0m Compress  "
             "\x1b[1;31m[d]\x1b[0m Del  "
             "\x1b[1;33m[r]\x1b[0m Rot  "
             "\x1b[1;35m[e]\x1b[0m Extr  "
@@ -285,10 +228,6 @@ class PDFChopTUI:
         buf.append(controls.ljust(cols))
 
         sys.stdout.write("".join(buf))
-        if kitty_seq:
-            kr, kc, kpayload = kitty_seq
-            sys.stdout.write(f"\x1b[{kr};{kc}H" + kpayload)
-            sys.stdout.write(f"\x1b[{rows};{cols}H")
         sys.stdout.flush()
 
     def handle_input(self):
@@ -395,23 +334,16 @@ class PDFChopTUI:
         elif seq in ("v", "V", "\r", "\n"):
             self.zoom_mode = not self.zoom_mode
             self.thumbnail_cache.clear()
-            sys.stdout.write("\x1b_Ga=d,d=a\x1b\\")
-            sys.stdout.flush()
             self.status_message = "Zoom mode enabled (full width)." if self.zoom_mode else "Split view enabled."
         # 't': Toggle Text inspection vs visual thumbnail
         elif seq in ("t", "T"):
             self.view_mode = "text" if self.view_mode == "visual" else "visual"
-            if self.view_mode == "text":
-                sys.stdout.write("\x1b_Ga=d,d=a\x1b\\")
-                sys.stdout.flush()
             self.status_message = "Text Inspector Mode (raw text)." if self.view_mode == "text" else "Visual Page Preview Mode."
         # Esc: Exit zoom mode if active
         elif seq == "\x1b":
             if self.zoom_mode:
                 self.zoom_mode = False
                 self.thumbnail_cache.clear()
-                sys.stdout.write("\x1b_Ga=d,d=a\x1b\\")
-                sys.stdout.flush()
                 self.status_message = "Split view enabled."
         # 'q': Quit
         elif seq in ("q", "Q", "\x03"):
